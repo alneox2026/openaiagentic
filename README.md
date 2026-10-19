@@ -47,7 +47,7 @@ The Agents API reports best-effort usage; it can be null or revised after a turn
 - Prices unreported cache writes as zero (not as a guessed surcharge), so estimates can understate model cost when a model charges for cache writes.
 - Uses the short-context rate card as an explicit estimate because Agents API reports turn totals rather than per-model-call context tiers; a warning is added when aggregate input crosses the catalog threshold.
 - Excludes OpenAI-hosted container/sandbox, tool, and third-party charges; those require separate provider usage data and reconciliation.
-- If usage is still unavailable after the bounded recovery attempts, the ledger marks it unavailable rather than inventing a zero-token usage report; the reservation is released by the existing settlement behavior.
+- Missing Agents API usage stays pending without delaying the streamed response or charging a partial/zero amount. The worker retries targeted turn lookups after the response and the scheduled reconciler retries every five minutes until reservation expiry; unresolved usage is then released as unpriced.
 
 Check the current [Agents API usage documentation](https://developers.openai.com/api/docs/guides/agents-api/observability) and [OpenAI API pricing](https://developers.openai.com/api/docs/pricing) before production pricing changes. The included `gpt-6-luna` catalog matches the existing OpenAI middleware catalog in this workspace; it is not a substitute for reviewing current rates.
 

@@ -9,6 +9,7 @@ from typing import Any, Callable
 from urllib.parse import quote
 
 import httpx
+from common.openai_usage_metadata import has_complete_turn_token_counts
 
 
 LOGGER = logging.getLogger(__name__)
@@ -119,6 +120,29 @@ class OpenAITurnUsageHydrator:
         else:
             turns_path = f"/agents/sessions/{session_path}/turns"
         url = f"{OPENAI_AGENTS_API_BASE_URL}{turns_path}"
+
+        # A targeted retrieve can expose a newly-populated usage object even
+        # when it was absent from an earlier list response. This is also the
+        # cheapest lookup for the common single-turn session.
+        if len(missing_ids) == 1:
+            turn_id = next(iter(missing_ids))
+            response = client.get(
+                f"{url}/{quote(turn_id, safe='')}",
+                headers=headers,
+            )
+            if response.status_code == 200:
+                payload = response.json()
+                usage = payload.get("usage") if isinstance(payload, dict) else None
+                if isinstance(usage, dict):
+                    return {turn_id: usage}
+                return found
+            if response.status_code not in {400, 404, 405}:
+                LOGGER.warning(
+                    "OpenAI turn-usage retrieve returned HTTP %s.",
+                    response.status_code,
+                )
+                return found
+
         params: dict[str, Any] = {"limit": 100, "order": "desc"}
         for _ in range(MAX_TURN_PAGES_PER_ATTEMPT):
             response = client.get(url, headers=headers, params=params)
@@ -137,7 +161,7 @@ class OpenAITurnUsageHydrator:
                     continue
                 turn_id = str(turn.get("id") or turn.get("turn_id") or "").strip()
                 usage = turn.get("usage")
-                if turn_id in missing_ids and isinstance(usage, dict):
+                if turn_id in missing_ids and has_complete_turn_token_counts(usage):
                     found[turn_id] = usage
             if missing_ids.issubset(found):
                 return found
@@ -158,7 +182,7 @@ class OpenAITurnUsageHydrator:
         missing: dict[str | None, set[str]] = {}
         for report in reports:
             turn_id = str(report.get("turn_id") or "").strip()
-            if not turn_id or isinstance(report.get("usage"), dict):
+            if not turn_id or has_complete_turn_token_counts(report.get("usage")):
                 continue
             raw_subagent_id = str(report.get("subagent_id") or "").strip()
             missing.setdefault(raw_subagent_id or None, set()).add(turn_id)
@@ -174,7 +198,7 @@ class OpenAITurnUsageHydrator:
             turn_id = str(report.get("turn_id") or "").strip()
             raw_subagent_id = str(report.get("subagent_id") or "").strip()
             lookup_key = (turn_id, raw_subagent_id or None)
-            if not isinstance(report.get("usage"), dict) and lookup_key in usage_by_turn:
+            if not has_complete_turn_token_counts(report.get("usage")) and lookup_key in usage_by_turn:
                 report = {**report, "usage": usage_by_turn[lookup_key]}
             hydrated.append(report)
         return hydrated

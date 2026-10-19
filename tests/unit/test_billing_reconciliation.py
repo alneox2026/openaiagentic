@@ -73,10 +73,9 @@ def test_expired_reservation_releases_held_credit_when_no_ledger_exists(monkeypa
     assert transaction["released_amount_nanos"] == 500_000_000
 
 
-def test_expired_reservation_query_filters_status_before_applying_batch_limit(
+def test_reserved_reservation_query_filters_status_before_applying_batch_limit(
     monkeypatch,
 ):
-    now = datetime(2026, 8, 11, 12, 0, tzinfo=timezone.utc)
     monkeypatch.setenv("BILLING_RECONCILIATION_BATCH_SIZE", "2")
     get_settings.cache_clear()
 
@@ -101,7 +100,7 @@ def test_expired_reservation_query_filters_status_before_applying_batch_limit(
         def collection(self, name):
             return self.collection_ref
 
-    expired = now.replace(hour=10)
+    expired = datetime(2026, 8, 11, 10, 0, tzinfo=timezone.utc)
     documents = [
         Snapshot({"status": "settled", "expires_at": expired})
         for _ in range(5)
@@ -111,7 +110,205 @@ def test_expired_reservation_query_filters_status_before_applying_batch_limit(
     client = Client(documents)
     service = BillingReconciliationService(firestore_client_factory=lambda: client)
 
-    results = list(service._expired_reservations(client, now))
+    results = list(service._reserved_reservations(client))
 
     assert results == [active]
+
+
+class FakeUsageHydrator:
+    def __init__(self, reports):
+        self.reports = reports
+        self.calls = []
+
+    def hydrate(self, *, session_id, reports):
+        self.calls.append((session_id, reports))
+        return self.reports
+
+
+class FakeLedgerRepository:
+    def __init__(self):
+        self.updates = []
+
+    def update_recovered_usage(self, client, turn_id, usage):
+        self.updates.append((turn_id, usage))
+
+
+class FakeMessagesRepository:
+    def __init__(self):
+        self.updates = []
+
+    def update_assistant_usage(self, client, *, thread_id, turn_id, usage):
+        self.updates.append((thread_id, turn_id, usage))
+        return True
+
+
+class FakeSettlementService:
+    def __init__(self):
+        self.events = []
+
+    def settle_if_required_sync(self, event):
+        self.events.append(event)
+        return object()
+
+
+class FakeQuery:
+    def __init__(self, snapshots):
+        self.snapshots = snapshots
+
+    def where(self, **_kwargs):
+        return self
+
+    def order_by(self, *_args):
+        return self
+
+    def limit(self, *_args):
+        return self
+
+    def stream(self):
+        return self.snapshots
+
+
+class FakeDocumentSnapshot:
+    def __init__(self, data):
+        self.data = data
+        self.exists = data is not None
+
+    def to_dict(self):
+        return dict(self.data) if self.data is not None else None
+
+
+class FakeDocumentReference:
+    def __init__(self, data):
+        self.data = data
+
+    def get(self):
+        return FakeDocumentSnapshot(self.data)
+
+
+class FakeReconciliationClient:
+    def __init__(self, settings, reservation, ledger):
+        self.settings = settings
+        self.reservation = reservation
+        self.ledger = ledger
+
+    def collection(self, name):
+        if name == self.settings.billing_reservations_collection:
+            return FakeQuery([FakeDocumentSnapshot(self.reservation)])
+        if name == self.settings.billing_ledger_collection:
+            return FakeCollection(self.ledger)
+        raise AssertionError(f"Unexpected collection: {name}")
+
+
+class FakeCollection:
+    def __init__(self, data):
+        self.data = data
+
+    def document(self, _document_id):
+        return FakeDocumentReference(self.data)
+
+
+def test_reconciler_reprices_turn_when_delayed_openai_usage_arrives(monkeypatch):
+    monkeypatch.setenv("DEPLOYMENT_ENVIRONMENT", "test")
+    get_settings.cache_clear()
+    ledger_repository = FakeLedgerRepository()
+    messages_repository = FakeMessagesRepository()
+    recovered_reports = [
+        {
+            "turn_id": "provider-turn-1",
+            "subagent_id": None,
+            "usage": {
+                "input_tokens": 1000,
+                "input_tokens_details": {"cached_tokens": 200},
+                "output_tokens": 100,
+                "output_tokens_details": {"reasoning_tokens": 20},
+            },
+        }
+    ]
+    hydrator = FakeUsageHydrator(recovered_reports)
+    service = BillingReconciliationService(
+        firestore_client_factory=lambda: None,
+        usage_hydrator=hydrator,
+        ledger_repository=ledger_repository,
+        messages_repository=messages_repository,
+    )
+    ledger = {
+        "turn_id": "turn-1",
+        "session_id": "session-1",
+        "thread_id": "thread-1",
+        "pricing_model": "gpt-6-luna",
+        "usage": {
+            "provider": "openai_agents_api",
+            "billing_status": "pending_provider_usage",
+            "pricing_model": "gpt-6-luna",
+            "completed_agent_turn_count": 1,
+            "missing_usage_turn_count": 1,
+            "usage_reporting_complete": False,
+            "estimated_cost_usd": None,
+            "raw_turn_usage_reports": [
+                {"turn_id": "provider-turn-1", "subagent_id": None, "usage": None}
+            ],
+        },
+    }
+
+    updated = service._recover_openai_usage(object(), ledger)
+
+    assert hydrator.calls[0][0] == "session-1"
+    assert updated["usage"]["missing_usage_turn_count"] == 0
+    assert updated["usage"]["estimated_cost_usd"] > 0
+    assert not service._has_pending_openai_usage(updated)
+    assert len(ledger_repository.updates) == 1
+    assert messages_repository.updates[0][:2] == ("thread-1", "turn-1")
+    get_settings.cache_clear()
+
+
+def test_reconciler_leaves_missing_usage_pending_before_reservation_expiry(
+    monkeypatch,
+):
+    get_settings.cache_clear()
+    settings = get_settings()
+    ledger = {
+        "event_id": "event-1",
+        "turn_id": "turn-1",
+        "agent_id": "maxima",
+        "uid": "user-1",
+        "thread_id": "thread-1",
+        "session_id": "session-1",
+        "created_at": datetime.now(timezone.utc),
+        "estimated_cost_usd": None,
+        "usage": {
+            "provider": "openai_agents_api",
+            "billing_status": "pending_provider_usage",
+            "pricing_model": "gpt-6-luna",
+            "completed_agent_turn_count": 1,
+            "missing_usage_turn_count": 1,
+            "usage_reporting_complete": False,
+            "estimated_cost_usd": None,
+            "raw_turn_usage_reports": [
+                {"turn_id": "provider-turn-1", "subagent_id": None, "usage": None}
+            ],
+        },
+    }
+    reservation = {
+        "status": "reserved",
+        "turn_id": "turn-1",
+        "expires_at": datetime.now(timezone.utc).replace(year=2027),
+        "reservation_id": "turn-1",
+        "billing_subject_id": "user-1",
+    }
+    client = FakeReconciliationClient(settings, reservation, ledger)
+    settlement = FakeSettlementService()
+    service = BillingReconciliationService(
+        firestore_client_factory=lambda: client,
+        settlement_service=settlement,
+        usage_hydrator=FakeUsageHydrator(ledger["usage"]["raw_turn_usage_reports"]),
+        ledger_repository=FakeLedgerRepository(),
+        messages_repository=FakeMessagesRepository(),
+    )
+
+    result = service.reconcile_expired_sync()
+
+    assert result.scanned_reservations == 1
+    assert result.skipped_reservations == 1
+    assert settlement.events == []
+    get_settings.cache_clear()
 

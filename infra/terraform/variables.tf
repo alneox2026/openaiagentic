@@ -207,19 +207,19 @@ variable "monthly_service_fee_nanos" {
 }
 
 variable "billing_reconciliation_batch_size" {
-  description = "Maximum expired billing reservations processed by one scheduled reconciliation run."
+  description = "Maximum reserved billing turns processed by one scheduled reconciliation run."
   type        = number
   default     = 100
 }
 
 variable "billing_reconciliation_schedule" {
-  description = "UTC cron schedule for reconciling finalized or expired billing reservations."
+  description = "UTC cron schedule for retrying missing provider usage and reconciling reservations."
   type        = string
-  default     = "0 * * * *"
+  default     = "*/5 * * * *"
 }
 
 variable "billing_reconciliation_enabled" {
-  description = "Whether Terraform should schedule expired-reservation reconciliation on the worker service."
+  description = "Whether Terraform should schedule usage recovery and billing reconciliation on the worker service."
   type        = bool
   default     = false
 }

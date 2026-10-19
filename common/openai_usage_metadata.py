@@ -33,6 +33,15 @@ def _int(value: Any) -> int | None:
     return None
 
 
+def has_complete_turn_token_counts(usage: Any) -> bool:
+    """Whether one Agents API turn report has both billable token totals."""
+    return (
+        isinstance(usage, dict)
+        and _int(usage.get("input_tokens")) is not None
+        and _int(usage.get("output_tokens")) is not None
+    )
+
+
 def _catalog_path() -> Path:
     configured = os.getenv("BILLING_CATALOG_PATH")
     if configured:

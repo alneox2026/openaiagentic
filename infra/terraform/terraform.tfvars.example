@@ -31,10 +31,11 @@ openai_api_key_secret_version = "1"
 
 # Prepaid wallet enforcement and reservation reconciliation.
 # Set billing_enforcement_enabled to true to require credit before every turn.
-# Expired reservations are automatically released by the worker reconciler job.
+# The worker retries missing OpenAI Agents API usage every five minutes and
+# releases unresolved reservations after their configured expiry.
 billing_enforcement_enabled    = false
 billing_reconciliation_enabled = false
-billing_reconciliation_schedule = "0 * * * *"
+billing_reconciliation_schedule = "*/5 * * * *"
 deployment_environment         = "development"
 
 # Optional: add Cloud Monitoring notification channel resource names for launch alerts.

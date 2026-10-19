@@ -1,4 +1,4 @@
-"""Immutable billing-ledger writes for completed agent turns."""
+"""Billing-ledger writes and monotonic OpenAI usage recovery."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ NANOS_PER_USD = Decimal("1000000000")
 
 
 class BillingLedgerRepository:
-    """Adds one immutable cost record per completed turn to a Firestore batch."""
+    """Creates each turn ledger once and fills delayed provider usage when found."""
 
     def __init__(self, collection: str | None = None) -> None:
         settings = get_settings()
@@ -28,8 +28,32 @@ class BillingLedgerRepository:
         client: Any,
         event: TurnCompletedEvent,
     ) -> None:
-        """Create, rather than merge, so a ledger entry can never be rewritten."""
+        """Create the initial ledger once; delayed usage is updated separately."""
         batch.create(self.document(client, event.turn_id), self._payload(event))
+
+    def update_recovered_usage(
+        self,
+        client: Any,
+        turn_id: str,
+        usage: dict[str, Any],
+    ) -> None:
+        """Update only metering fields after a delayed Agents API usage lookup."""
+        cost_usd = self._estimated_cost_usd(usage)
+        cost_usd_nanos = self._cost_usd_nanos(cost_usd)
+        self.document(client, turn_id).update(
+            {
+                "cost_status": "estimated" if cost_usd_nanos is not None else "unavailable",
+                "estimated_cost_usd": cost_usd,
+                "estimated_cost_usd_nanos": cost_usd_nanos,
+                "pricing_model": self._optional_string(usage.get("pricing_model")),
+                "pricing_version": self._optional_string(usage.get("pricing_version")),
+                "pricing_unit": self._optional_string(usage.get("pricing_unit")),
+                "pricing": self._mapping(usage.get("pricing")),
+                "billable_tokens": self._mapping(usage.get("billable_tokens")),
+                "token_counts": self._mapping(usage.get("token_counts")),
+                "usage": usage,
+            }
+        )
 
     def _payload(self, event: TurnCompletedEvent) -> dict[str, Any]:
         usage = event.usage if isinstance(event.usage, dict) else {}

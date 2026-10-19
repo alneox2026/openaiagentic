@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from common.constants import STATUS_COMPLETED
 from common.schemas import TurnCompletedEvent
 from services.agent_persistence_worker_v3.app.core.config import get_settings
+
+LOGGER = logging.getLogger(__name__)
 
 
 class FirestoreMessagesRepository:
@@ -64,3 +67,26 @@ class FirestoreMessagesRepository:
             },
             merge=True,
         )
+
+    def update_assistant_usage(
+        self,
+        client: Any,
+        *,
+        thread_id: str,
+        turn_id: str,
+        usage: dict[str, Any],
+    ) -> bool:
+        """Refresh the assistant transcript's usage after delayed recovery."""
+        assistant_doc = self._messages_collection(client, thread_id).document(
+            f"{turn_id}_assistant"
+        )
+        try:
+            assistant_doc.update({"usage": usage})
+        except Exception as exc:
+            if exc.__class__.__name__ == "NotFound":
+                LOGGER.info(
+                    "Recovered OpenAI usage for a turn whose assistant message is no longer present."
+                )
+                return False
+            raise
+        return True

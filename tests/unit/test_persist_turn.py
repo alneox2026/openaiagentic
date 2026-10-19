@@ -63,6 +63,15 @@ class FakeMessagesRepository:
         batch.actions.append(("messages", event.turn_id))
 
 
+class FakeSettlementService:
+    def __init__(self):
+        self.events = []
+
+    def settle_if_required_sync(self, event):
+        self.events.append(event)
+        return None
+
+
 def _build_event() -> TurnCompletedEvent:
     return TurnCompletedEvent(
         event_id="evt-1",
@@ -223,3 +232,48 @@ def test_missing_openai_usage_does_not_create_a_zero_charge(monkeypatch) -> None
     assert processed.usage["estimated_cost_usd"] is None
     assert processed.usage["estimated_cost_complete"] is False
     assert "agents_api_turn_usage_unavailable" in processed.usage["pricing_warnings"]
+
+
+def test_persist_turn_keeps_reservation_pending_until_openai_usage_arrives(monkeypatch) -> None:
+    monkeypatch.setenv("DEPLOYMENT_ENVIRONMENT", "test")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    ledger = FakeBillingLedgerRepository()
+    settlement = FakeSettlementService()
+    event = _build_event().model_copy(
+        update={
+            "usage": {
+                "provider": "openai_agents_api",
+                "pricing_model": "gpt-6-luna",
+                "completed_agent_turn_count": 1,
+                "raw_turn_usage_reports": [
+                    {"turn_id": "agent_turn_1", "subagent_id": None, "usage": None}
+                ],
+            },
+            "infrastructure_metering": InfrastructureMetering(
+                deployment_environment="development",
+                project_id="test-project",
+                gateway_region="us-central1",
+                billing_subject_id="user-1",
+                root_request_id="req-1",
+                agent_backend="openai_managed",
+                agent_region="global",
+                gateway_wall_duration_ms=100,
+                assistant_content_bytes=2,
+            ),
+        }
+    )
+    service = PersistTurnService(
+        idempotency_store=FakeIdempotencyStore(),
+        billing_ledger_repository=ledger,
+        billing_settlement_service=settlement,
+        threads_repository=FakeThreadsRepository(),
+        messages_repository=FakeMessagesRepository(),
+        firestore_client_factory=FakeClient,
+    )
+
+    result = asyncio.run(service.persist(event))
+
+    assert result.billing_settlement_status == "usage_pending"
+    assert settlement.events == []
+    assert ledger.events[0].usage["billing_status"] == "pending_provider_usage"
+    assert ledger.events[0].usage["estimated_cost_usd"] is None

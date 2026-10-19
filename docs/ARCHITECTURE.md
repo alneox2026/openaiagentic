@@ -20,8 +20,8 @@ Persistence worker
   ├─ recovers missing usage from the session with bounded read-only lookups
   ├─ aggregates tokens and applies the versioned per-turn rate card
   ├─ persists transcript and idempotency marker
-  ├─ creates immutable agent billing ledger entry
-  └─ settles/releases the existing shared customer wallet reservation
+  ├─ creates the agent billing ledger entry (usage-only recovery is allowed later)
+  └─ settles when usage is ready, or releases unresolved holds after expiry
 ```
 
 ## OpenAI API contract

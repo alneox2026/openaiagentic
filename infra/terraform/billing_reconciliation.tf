@@ -2,7 +2,7 @@ resource "google_cloud_scheduler_job" "billing_reconciliation" {
   count = var.billing_reconciliation_enabled ? 1 : 0
 
   name             = "${var.worker_service_name}-billing-reconciliation"
-  description      = "Releases expired agent-credit holds and settles finalized billing ledgers."
+  description      = "Retries missing agent usage, settles completed turns, and releases expired credit holds."
   region           = var.region
   schedule         = var.billing_reconciliation_schedule
   time_zone        = "Etc/UTC"
