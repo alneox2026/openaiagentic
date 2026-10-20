@@ -38,6 +38,27 @@ class ChatSessionService:
         user_id: str,
         request: ChatRequest,
     ) -> ResolvedChatSession:
+        existing = await self.resolve_existing(
+            agent_config=agent_config,
+            user_id=user_id,
+            request=request,
+        )
+        if existing is not None:
+            return existing
+        return await self.create_new(
+            runtime_client=runtime_client,
+            agent_config=agent_config,
+            user_id=user_id,
+            request=request,
+        )
+
+    async def resolve_existing(
+        self,
+        *,
+        agent_config: AgentConfig,
+        user_id: str,
+        request: ChatRequest,
+    ) -> ResolvedChatSession | None:
         if request.thread_id:
             return await asyncio.to_thread(
                 self._resolve_existing_sync,
@@ -45,14 +66,22 @@ class ChatSessionService:
                 user_id,
                 request,
             )
-
         if request.session_id:
             raise ApiError(
                 400,
                 "session_id_without_thread_id",
                 "A session_id cannot be supplied without a backend-owned thread_id.",
             )
+        return None
 
+    async def create_new(
+        self,
+        *,
+        runtime_client: ChatBackendClient,
+        agent_config: AgentConfig,
+        user_id: str,
+        request: ChatRequest,
+    ) -> ResolvedChatSession:
         created = await runtime_client.ensure_session(
             agent_config=agent_config,
             user_id=user_id,

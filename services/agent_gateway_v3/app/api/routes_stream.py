@@ -275,8 +275,7 @@ async def stream_chat(
         )
     backend_client = await get_streaming_chat_backend_client(agent_config)
     session_service = await get_chat_session_service()
-    session_result = await session_service.resolve(
-        runtime_client=backend_client,
+    session_result = await session_service.resolve_existing(
         agent_config=agent_config,
         user_id=user_id,
         request=payload,
@@ -289,6 +288,19 @@ async def stream_chat(
         turn_id=request_context.turn_id,
         reservation_nanos=agent_config.reservation_nanos,
     )
+    try:
+        if session_result is None:
+            session_result = await session_service.create_new(
+                runtime_client=backend_client,
+                agent_config=agent_config,
+                user_id=user_id,
+                request=payload,
+            )
+    except Exception:
+        if billing_reservation:
+            with suppress(Exception):
+                await wallet_reservation_service.release(billing_reservation)
+        raise
     billing_metadata = (
         billing_reservation.event_metadata() if billing_reservation else None
     )
